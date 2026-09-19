@@ -116,7 +116,7 @@
 @@ -383,7 +383,7 @@ for k, v in pairs(nodes_table) do
  end
  
- m:appendTemplate("/global/footer", {shunt_list = api.jsonc.stringify(shunt_list)})
+ m:appendTemplate("/global/footer")
 -
 +m:appendTemplate("/global/status_bottom")
  m:appendTemplate("/cbi/sortable", {sectiontype = s2.sectiontype})
@@ -128,11 +128,12 @@ new file mode 100644
 index 000000000000..a00fff9c79b3
 --- /dev/null
 +++ b/luci-app-passwall2/luasrc/view/passwall2/global/status_bottom.htm
-@@ -0,0 +1,134 @@
+@@ -0,0 +1,135 @@
 +<style>
 +.pure-img {
 +    max-height: 100%;
 +    width: auto;
++   display: inline-block;
 +}
 +.flag .pure-img {
 +    max-height: none;

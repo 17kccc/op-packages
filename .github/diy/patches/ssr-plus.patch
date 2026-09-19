@@ -3,7 +3,7 @@
 @@ -33,6 +33,13 @@ LUCI_DEPENDS:= \
  	+libuci-lua +lua +luci-compat +coreutils +coreutils-base64 +dns2tcp +dnsmasq-full \
  	+jq +ip-full +lua-neturl +libuci-lua +microsocks +ipt2socks +lyaml \
- 	+resolveip +curl +nping +unzip +xz-utils +xz \
+ 	+resolveip +bind-dig +curl +nping +unzip +xz-utils +xz \
 +	+PACKAGE_$(PKG_NAME)_INCLUDE_Xray:xray-core \
 +	+PACKAGE_$(PKG_NAME)_INCLUDE_Xray:coreutils-timeout \
 +	+PACKAGE_$(PKG_NAME)_INCLUDE_Http_Proxy:3proxy \
@@ -129,11 +129,12 @@ new file mode 100644
 index 000000000000..a00fff9c79b3
 --- /dev/null
 +++ b/luci-app-ssr-plus/luasrc/view/shadowsocksr/status_bottom.htm
-@@ -0,0 +1,134 @@
+@@ -0,0 +1,135 @@
 +<style>
 +.pure-img {
 +    max-height: 100%;
 +    width: auto;
++   display: inline-block;
 +}
 +.flag .pure-img {
 +    max-height: none;
