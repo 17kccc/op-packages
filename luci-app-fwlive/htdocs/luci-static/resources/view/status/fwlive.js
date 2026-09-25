@@ -48,11 +48,13 @@ const callFwliveLoggingStatus = rpc.declare({
 	expect: {
 		'': {
 			wan_zone: null,
+			wan_zone_candidates: [],
 			wan_log: false,
 			wan_log_limit: null,
 			nf_log_ipv4: false,
 			nf_log_ipv6: false,
 			ready: false,
+			weak_device: false,
 			blockers: [],
 			warnings: []
 		}
@@ -62,20 +64,20 @@ const callFwliveLoggingStatus = rpc.declare({
 const callFwliveEnableLogging = rpc.declare({
 	object: 'fwlive',
 	method: 'enable_wan_logging',
-	expect: { '': { ok: false, changed: false, wan_zone: null } }
+	expect: { '': { ok: false, changed: false, wan_zone: null, wan_zone_candidates: [] } }
 });
 
 const callFwliveDisableLogging = rpc.declare({
 	object: 'fwlive',
 	method: 'disable_wan_logging',
-	expect: { '': { ok: false, changed: false, wan_zone: null } }
+	expect: { '': { ok: false, changed: false, wan_zone: null, wan_zone_candidates: [] } }
 });
 
 function storedValue(key, fallback) {
 	try {
 		const v = localStorage.getItem(key);
 		return v === null ? fallback : v;
-	} catch (e) {
+	} catch (_e) {
 		return fallback;
 	}
 }
@@ -83,7 +85,7 @@ function storedValue(key, fallback) {
 function storeValue(key, value) {
 	try {
 		localStorage.setItem(key, value);
-	} catch (e) {
+	} catch (_e) {
 		/* private mode / no storage */
 	}
 }
@@ -93,6 +95,17 @@ function optionNodes(pairs) {
 	for (let i = 0; i < pairs.length; i++)
 		opts.push(E('option', { 'value': pairs[i][0] }, [pairs[i][1]]));
 	return opts;
+}
+
+function isIpv4Address(addr) {
+	if (addr.indexOf('.') === -1) return false;
+
+	const octets = addr.split('.');
+	if (octets.length !== 4) return false;
+	for (let i = 0; i < octets.length; i++) {
+		if (!/^\d{1,3}$/.test(octets[i]) || Number(octets[i]) > 255) return false;
+	}
+	return true;
 }
 
 return view.extend({
@@ -130,6 +143,7 @@ return view.extend({
 	summaryRowsShown: false,
 	summaryData: null,
 	resolveLoadShed: false,
+	resolveShedUntil: 0,
 	filterInputTimer: null,
 	messageLayout: 'wrap',
 	/* Session-new IDs from the last applied batch; this is not buffer growth. */
@@ -207,14 +221,14 @@ return view.extend({
 		const entries = location.hash.substring(1).split('&');
 		const result = [];
 		for (let i = 0; i < entries.length; i++) {
-			const kv = entries[i].split('=');
-			if (kv.length !== 2) continue;
+			const separator = entries[i].indexOf('=');
+			if (separator === -1) continue;
 			let key;
 			let val;
 			try {
-				key = decodeURIComponent(kv[0]);
-				val = decodeURIComponent(kv[1]);
-			} catch (e) {
+				key = decodeURIComponent(entries[i].substring(0, separator));
+				val = decodeURIComponent(entries[i].substring(separator + 1));
+			} catch (_e) {
 				continue;
 			}
 			result.push({ key: key, val: val });
@@ -393,8 +407,20 @@ return view.extend({
 		return constants.DEFAULT_ROW_TINT;
 	},
 
+	readRowTintPalette() {
+		const v = storedValue('fwlive-row-tint-palette', null);
+		if (v === 'accessible') return 'accessible';
+		if (v === 'classic') return 'classic';
+		/* Migrate an enabled legacy mode into the separate palette key. */
+		return this.readRowTint() === 'accessible' ? 'accessible' : 'classic';
+	},
+
 	saveRowTint() {
 		storeValue('fwlive-row-tint', this.rowTint);
+	},
+
+	saveRowTintPalette() {
+		storeValue('fwlive-row-tint-palette', this.rowTintPalette);
 	},
 
 	rowTintPaletteOptions() {
@@ -431,6 +457,7 @@ return view.extend({
 
 	commitRowTintChange() {
 		this.saveRowTint();
+		this.saveRowTintPalette();
 		this.tintProbeDone = false;
 		this.applyRowTintMode();
 		this.updateRowTintUi();
@@ -441,7 +468,10 @@ return view.extend({
 		const v = ev && ev.target ? ev.target.value : 'classic';
 		const pal = v === 'accessible' ? 'accessible' : 'classic';
 		this.rowTintPalette = pal;
-		if (!this.rowTintEnabled()) return;
+		if (!this.rowTintEnabled()) {
+			this.saveRowTintPalette();
+			return;
+		}
 		this.rowTint = pal;
 		this.commitRowTintChange();
 	},
@@ -543,9 +573,37 @@ return view.extend({
 	},
 
 	isLikelyIp(addr) {
-		if (!addr) return false;
+		if (typeof addr !== 'string' || !addr) return false;
+		if (isIpv4Address(addr)) return true;
+		if (!addr.includes(':') || !/^[\da-f:.]+$/i.test(addr) || addr.includes(':::'))
+			return false;
 
-		return /^[\da-fA-F:.]+$/.test(addr);
+		const compression = addr.indexOf('::');
+		if (compression !== -1 && addr.indexOf('::', compression + 2) !== -1) return false;
+		/* A stray leading/trailing colon is not part of a single `::`. */
+		if (addr[0] === ':' && addr[1] !== ':') return false;
+		if (addr[addr.length - 1] === ':' && addr[addr.length - 2] !== ':') return false;
+
+		let groups;
+		let embeddedIpv4 = false;
+		if (addr.includes('.')) {
+			const lastColon = addr.lastIndexOf(':');
+			if (lastColon === -1 || !isIpv4Address(addr.substring(lastColon + 1))) return false;
+			groups = addr.substring(0, lastColon).split(':').filter(Boolean);
+			embeddedIpv4 = true;
+		} else {
+			groups = addr.split(':').filter(Boolean);
+		}
+
+		if (
+			groups.some(function (group) {
+				return !/^[\da-f]{1,4}$/i.test(group);
+			})
+		)
+			return false;
+
+		const groupCount = groups.length + (embeddedIpv4 ? 2 : 0);
+		return compression === -1 ? groupCount === 8 : groupCount < 8;
 	},
 
 	activeColumns() {
@@ -623,7 +681,7 @@ return view.extend({
 			/* Bounds / mktemp failures are reply.error — same idea as poll. */
 			this.lastRulesError = (res && res.error) || null;
 			if (this.lastRulesError) console.warn('fwlive rules map error:', this.lastRulesError);
-		} catch (e) {
+		} catch (_e) {
 			if (this.viewDisposed) return;
 			this.rulesMap = {};
 			this.firewallBackend = 'nft';
@@ -633,7 +691,6 @@ return view.extend({
 	},
 
 	backendDisplayLabel() {
-		if (this.firewallBackend === 'iptables') return _('using iptables');
 		if (this.firewallBackend === 'nft') return _('using fw4');
 		return '';
 	},
@@ -662,6 +719,13 @@ return view.extend({
 				text = text ? text + ' \u00b7 ' + warn : warn;
 				degraded = true;
 			}
+			if (warnings.indexOf('legacy_iptables_detected') >= 0) {
+				const warn = _(
+					'Live view may be incomplete — a legacy iptables table is registered'
+				);
+				text = text ? text + ' \u00b7 ' + warn : warn;
+				degraded = true;
+			}
 			label.textContent = text;
 			label.classList.toggle('fwlive-backend-warn', degraded);
 		}
@@ -675,10 +739,15 @@ return view.extend({
 			const status = await callFwliveLoggingStatus();
 			if (this.viewDisposed) return;
 			this.loggingStatus = status;
+			this.loggingNotice = '';
 			this.weakDevice = !!(this.loggingStatus && this.loggingStatus.weak_device === true);
-		} catch (e) {
+		} catch (_e) {
 			if (this.viewDisposed) return;
-			this.loggingStatus = null;
+			/* Keep last toolbar state. Do not clobber a toggle success/failure notice. */
+			if (!this.loggingNotice)
+				this.loggingNotice = _(
+					'Could not refresh logging status; showing the last known state.'
+				);
 		}
 		this.updateBackendUi();
 		this.updateLoggingToolbarUi();
@@ -704,8 +773,12 @@ return view.extend({
 
 			this.loggingNotice = opts.successNotice(res);
 			if (opts.onSuccess) opts.onSuccess(res);
+			if (this.loggingStatus && typeof opts.wanLog === 'boolean')
+				this.loggingStatus = Object.assign({}, this.loggingStatus, {
+					wan_log: opts.wanLog
+				});
 			await this.loadLoggingStatus();
-		} catch (e) {
+		} catch (_e) {
 			this.loggingNotice = opts.catchNotice();
 			await this.loadLoggingStatus();
 		} finally {
@@ -717,6 +790,7 @@ return view.extend({
 
 	async handleEnableLogging() {
 		return this.runLoggingToggle({
+			wanLog: true,
 			call: () => callFwliveEnableLogging(),
 			initialUi: () => {
 				this.updateEmptyStateUi();
@@ -744,6 +818,7 @@ return view.extend({
 
 	async handleDisableLogging() {
 		return this.runLoggingToggle({
+			wanLog: false,
 			call: () => callFwliveDisableLogging(),
 			initialUi: () => this.updateLoggingToolbarUi(),
 			failureNotice: (res) => {
@@ -779,7 +854,6 @@ return view.extend({
 		return {
 			loggingStatus: this.loggingStatus,
 			loggingBusy: this.loggingBusy,
-			entriesLength: this.entries.length,
 			loggingNotice: this.loggingNotice,
 			showConsent: this.shouldShowLoggingConsent()
 		};
@@ -791,10 +865,13 @@ return view.extend({
 		const st = this.loggingStatus;
 		/* Sort blockers so unstable backend order does not force a rebuild. */
 		const blockers = st && st.blockers ? st.blockers.slice().sort().join(',') : '';
+		const candidates =
+			st && Array.isArray(st.wan_zone_candidates) ? st.wan_zone_candidates.join(',') : '';
 		return [
 			st ? (st.wan_log ? '1' : '0') : 'x',
 			st ? String(st.wan_log_limit || '') : '',
 			blockers,
+			candidates,
 			this.loggingBusy ? '1' : '0',
 			this.loggingNotice || '',
 			this.shouldShowLoggingConsent() ? 'c1' : 'c0'
@@ -876,7 +953,7 @@ return view.extend({
 			reply = await callFwlivePoll({
 				addresses: [String(fetchLines)]
 			});
-		} catch (e) {
+		} catch (_e) {
 			reply = null;
 		}
 		return {
@@ -1322,7 +1399,14 @@ return view.extend({
 		this.summaryRowsShown = false;
 		this.summaryData = null;
 		this.updateSummaryUi();
-		this.renderRows(true);
+		if (this.tablePaused) {
+			const empty = document.getElementById('fwlive-empty');
+			if (empty) {
+				const rows = this.filteredRows();
+				empty.style.display = rows.length ? 'none' : 'block';
+			}
+			this.updateStatus();
+		} else this.renderRows(true);
 	},
 
 	onSummaryRowsToggle() {
@@ -1458,8 +1542,10 @@ return view.extend({
 		this.resolveGeneration = (this.resolveGeneration || 0) + 1;
 		this.resolveInFlight = false;
 
-		if (this.showHostnames) this.resolveHostnamesForEntries(this.filteredRows());
+		/* Paint the existing cache immediately; resolving only fills misses. */
+		if (this.tablePaused) this.updateStatus();
 		else this.renderRows(true);
+		if (this.showHostnames) this.resolveHostnamesForEntries(this.filteredRows());
 	},
 
 	onFetchModeChange(ev) {
@@ -1506,6 +1592,7 @@ return view.extend({
 		}
 
 		if (wasPaused && !this.tablePaused) {
+			this.pauseBufferLoading = false;
 			this.fillingBuffer = false;
 			this.followLive = true;
 			/* Merge pause buffer with the first live poll — do not replace. */
@@ -1530,8 +1617,7 @@ return view.extend({
 		/* Reset flood throttle so Limit changes paint even during ping -A. */
 		this.ensureRenderScheduler().resetBudget();
 		const cancelForce = this.ensureRenderScheduler().forceNextRender();
-		if (!this.tablePaused) this.renderRows(true);
-		else this.updateStatus();
+		this.renderRows(true);
 		const epoch = this.currentPollEpoch();
 		this.requestPoll()
 			.then(() => {
@@ -1609,11 +1695,15 @@ return view.extend({
 	},
 
 	resolveNamesFromReply(res) {
-		return res && typeof res === 'object' && res.names && typeof res.names === 'object'
-			? res.names
-			: res && typeof res === 'object' && !Array.isArray(res)
-				? res
-				: {};
+		if (!res || typeof res !== 'object' || Array.isArray(res)) return null;
+		if (Object.prototype.hasOwnProperty.call(res, 'error')) return null;
+		if (Object.prototype.hasOwnProperty.call(res, 'names')) {
+			return res.names && typeof res.names === 'object' && !Array.isArray(res.names)
+				? res.names
+				: null;
+		}
+		/* Legacy expect-unwrap replies are the names map itself. */
+		return res;
 	},
 
 	async resolveHostnamesForEntries(entries) {
@@ -1631,7 +1721,7 @@ return view.extend({
 
 		for (let i = 0; i < ips.length && need.length < 32; i++) {
 			const ip = ips[i];
-			if (this.hostnameCache.has(ip)) continue;
+			if (hostname.lruGet(this.hostnameCache, ip) !== undefined) continue;
 			if (hostname.failIsHot(this.hostnameFailed, ip, now)) continue;
 			need.push(ip);
 		}
@@ -1655,14 +1745,12 @@ return view.extend({
 
 			this.resolveLoadShed = false;
 			this.resolveShedUntil = 0;
-			/* RPC-level failure (no_resolver, jshn_missing, invalid_input): the
-			 * reply carries no per-address signal, so return without failMark —
-			 * otherwise every address looks like "no PTR" and retries stall
-			 * for the failure TTL. */
-			if (res && typeof res === 'object' && typeof res.error === 'string' && res.error)
-				return;
 			/* Full reply: names map under .names; legacy expect-unwrap was the map. */
 			const names = this.resolveNamesFromReply(res);
+			/* RPC-level failures carry no per-address signal. Do not turn numeric,
+			 * null, or malformed replies into negative hostname cache entries. */
+			if (names === null) return;
+			const truncated = res && typeof res === 'object' && res.truncated === true;
 			let updated = false;
 
 			for (let i = 0; i < need.length; i++) {
@@ -1671,14 +1759,16 @@ return view.extend({
 					hostname.lruSet(this.hostnameCache, ip, names[ip]);
 					this.hostnameFailed.delete(ip);
 					updated = true;
-				} else {
+				} else if (Object.prototype.hasOwnProperty.call(names, ip) || !truncated) {
+					/* Empty-string names are completed NXDOMAIN/timeout lookups.
+					 * Truncated replies omit unprocessed addresses entirely. */
 					hostname.failMark(this.hostnameFailed, ip, now);
 				}
 			}
 
 			this.updateAdaptiveBanner();
 			if (updated) this.scheduleRenderRows(true);
-		} catch (e) {
+		} catch (_e) {
 			/* resolve unavailable — show IPs */
 		} finally {
 			if (gen === this.resolveGeneration) this.resolveInFlight = false;
@@ -1796,8 +1886,7 @@ return view.extend({
 		this.messageLayout = next;
 		this.saveMessageLayout();
 		this.updateMessageLayoutUi();
-		if (this.tablePaused) this.updateStatus();
-		else this.renderRows(true);
+		this.renderRows(true);
 	},
 
 	renderRows(force) {
@@ -1842,8 +1931,7 @@ return view.extend({
 				expandedRowId: this.expandedRowId,
 				rowTint: this.rowTintEnabled(),
 				showHostnames: !!this.showHostnames,
-				hostnameCache: this.hostnameCache,
-				firewallBackend: this.firewallBackend
+				hostnameCache: this.hostnameCache
 			},
 			{
 				onRowClick: (rowId, ev) => this.onRowClick(rowId, ev),
@@ -1964,7 +2052,7 @@ return view.extend({
 		try {
 			try {
 				await this.fetchEntries();
-			} catch (e) {
+			} catch (_e) {
 				/* fetchEntries already accounts the poll RTT for every rpc
 				 * outcome; a throw here is a local normalize/buffer bug, not
 				 * network slowness, so count nothing further. */
@@ -1977,15 +2065,17 @@ return view.extend({
 			 * cadence state; summary mode can therefore appear while rows are paused
 			 * and stays behind the explicit Show rows control. */
 			if (this.tablePaused) this.updateStatus();
-			else if (this.summaryMode) this.renderSummary();
-			else this.scheduleRenderRows();
+			else if (this.summaryMode) {
+				this.renderSummary();
+				this.updateStatus();
+			} else this.scheduleRenderRows();
 
 			try {
 				await this.resolveHostnamesForEntries(this.filteredRows());
-			} catch (e) {
+			} catch (_e) {
 				/* resolve unavailable — show IPs */
 			}
-		} catch (e) {
+		} catch (_e) {
 			/* Keep the coordinator promise settling so a queued refresh cannot
 			 * be stranded by an unexpected local rendering failure. */
 			if (epoch === this.currentPollEpoch()) this.lastPollError = true;
@@ -2447,7 +2537,7 @@ return view.extend({
 		this.messageLayout = this.readMessageLayout();
 		this.showHostnames = this.readShowHostnames();
 		this.rowTint = this.readRowTint();
-		this.rowTintPalette = this.rowTintEnabled() ? this.rowTint : 'classic';
+		this.rowTintPalette = this.readRowTintPalette();
 		this.hostnameCache = new Map();
 		this.hostnameFailed = new Map();
 		this.resolveGeneration = 0;
@@ -2466,8 +2556,7 @@ return view.extend({
 		this.updateTintWarnUi();
 		this.renderRows(true);
 		const testLi = document.getElementById('fwlive-manual-test');
-		if (testLi)
-			logging.renderManualTestNodes(testLi, { firewallBackend: this.firewallBackend }, {});
+		if (testLi) logging.renderManualTestNodes(testLi, {}, {});
 		if (this.showHostnames) this.resolveHostnamesForEntries(this.filteredRows());
 	}
 });

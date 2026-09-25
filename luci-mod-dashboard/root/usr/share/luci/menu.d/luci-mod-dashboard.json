@@ -1,16 +1,13 @@
 {
-	"admin/dashboard": {
+	"admin/status/dashboard": {
 		"title": "Dashboard",
-		"order": 1,
+		"order": 2,
 		"action": {
 			"type": "view",
 			"path": "dashboard/index"
 		},
 		"depends": {
-			"acl": [ "luci-mod-dashboard-index" ],
-			"uci": {
-				"wireless": true
-			}
+			"acl": [ "luci-mod-dashboard-index" ]
 		}
 	}
 }

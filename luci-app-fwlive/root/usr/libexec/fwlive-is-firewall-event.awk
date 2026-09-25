@@ -28,7 +28,7 @@ function has_hint(s, lc) {
 }
 function non_fw_prefix(s, lc) {
 	lc = tolower(s)
-	return lc ~ "^(dnsmasq|procd|ubusd|netifd|odhcpd|logd|dropbear|uhttpd|hostapd|wpad)([^a-z0-9_]|$)"
+	return lc ~ "^(dnsmasq|procd|ubusd|netifd|odhcpd|logd|dropbear|uhttpd|hostapd|wpad)([^a-z0-9_-]|$)"
 }
 function detect_action(s, words, n, i, w, wl, lc, start, pos, before, afterc, best, bestpos) {
 	n = split("ACCEPT ALLOW PASS DROP REJECT DENY BLOCK", words, " ")
@@ -64,6 +64,8 @@ function json_unhex4(h, n, i, c, v) {
 	return n
 }
 function json_get_msg(obj, s, i, c, esc, out, hex, n) {
+	# Summary decoder is ASCII/Latin-1 oriented. \uXXXX outside 1..255 is
+	# collapsed (not UTF-8). Invalid \u appends u. NUL is dropped.
 	if (!match(obj, /"msg"[[:space:]]*:[[:space:]]*"/)) return ""
 	s = substr(obj, RSTART + RLENGTH)
 	out = ""
@@ -79,6 +81,8 @@ function json_get_msg(obj, s, i, c, esc, out, hex, n) {
 			else if (c == "u") {
 				hex = substr(s, i + 1, 4)
 				n = (length(hex) == 4) ? json_unhex4(hex) : -1
+				# 1..255: Latin-1 %c. n>255: collapse. n<0: append u.
+				# n==0 (NUL): BusyBox awk strings cannot hold NUL; drop it.
 				if (n >= 1 && n <= 255) out = out sprintf("%c", n)
 				else if (n < 0) out = out "u"
 				if (n >= 0) i += 4

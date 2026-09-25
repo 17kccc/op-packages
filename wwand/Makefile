@@ -11,6 +11,7 @@
 #   wwand-ncm        - NCM/ECM backend        (DEPENDS wwand)
 #   wwand-mhi        - PCIe/MHI transport + drivers (DEPENDS wwand; add a backend)
 #   wwand-esim       - eSIM management        (DEPENDS wwand + lpac; no backend)
+#   wwand-gps        - GNSS/NMEA reader (DEPENDS wwand; no backend)
 # A typical QMI router installs `wwand-qmi` (which pulls in `wwand`); add
 # `wwand-mbim` / `wwand-ncm` for those modems, `wwand-mhi` for a PCIe/MHI modem.
 # The ucode tree ships PRECOMPILED to bytecode (repo-root CMakeLists.txt,
@@ -49,12 +50,12 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=wwand
-PKG_VERSION:=1.6.7_p21
-PKG_RELEASE:=46
+PKG_VERSION:=1.6.8_p5
+PKG_RELEASE:=54
 
 PKG_SOURCE_PROTO:=git
 PKG_SOURCE_URL:=https://github.com/ddimension/wwand.git
-PKG_SOURCE_VERSION:=910e38b7e4c92e273b91aeead3bea7e2f7104a27
+PKG_SOURCE_VERSION:=32b3c569747308e524e54e7797d4a1dab29c4e20
 PKG_MIRROR_HASH:=skip
 
 PKG_LICENSE:=GPL-2.0-only
@@ -160,6 +161,88 @@ define Package/wwand/description
   service schemas), the generic service client, the SIM/APDU layer and the
   shared modem/context core. Install a backend package (wwand-qmi, wwand-mbim
   or wwand-ncm) for the control protocols your modems use.
+endef
+
+# THE rc.d SYMLINK CARRIES THE STOP ORDER, NOT THE SCRIPT.
+#
+# `/etc/rc.d/K<n>wwand` is created once, by `enable`, from the STOP= that the
+# init script had AT THAT MOMENT. Shipping a new script with a different STOP
+# changes nothing on a box where the service is already enabled — the old
+# symlink stays and the old order stays with it.
+#
+# That made the ddimension/wwand#36 fix inert exactly where it was needed.
+# wwand moved to STOP=84 to be torn down one step BEFORE odhcpd, so it can
+# still tell the LAN the prefix is going while there is somebody to tell. On
+# an upgraded box the symlink was still K85wwand, which sorts AFTER K85odhcpd
+# (same number, alphabetical) — odhcpd died first and the announcement went
+# nowhere. Measured on three of our own routers, 2026-09-22: every one of them
+# had the fix installed and none of them had it in effect.
+#
+# `enable` alone would already fix the ORDER — it creates K84, which sorts before
+# K85odhcpd, so the withdrawal does go out. What it does not do is clean up: it
+# only ever `ln -sf`s the current names (rc.common:44-54) and leaves K85 and S25
+# standing, so the box then stops wwand twice (the second time after odhcpd, where
+# it does nothing) and starts it twice. `disable` removes S??/K?? with any number
+# (rc.common:38-42), so disable-then-enable is what leaves rc.d as the package
+# means it.
+#
+# AND THE TEST IS NOT `enabled`. That helper wants S<START> AND K<STOP> to exist
+# with the values the CURRENT script carries (rc.common:56-64) — which is exactly
+# what an upgraded box does not have, so asking it here skips the very case this
+# exists for. Verified on hardware, 2026-09-22: with S25/K85 in place and the
+# script saying 19/84, `enabled` answers no. The question that CAN be answered is
+# "is there a start symlink at all", which is true for a service the operator left
+# on, whatever numbers it carries, and false for one they switched off.
+#
+# The rollback is not decoration. `disable` unlinks before `enable` relinks, and
+# a read-only or full overlay between the two leaves the box with NO start link,
+# which is worse than the stale order we came to fix. So the old names are
+# remembered first and put back if the re-registration did not take.
+#
+# WHAT IS CHECKED IS THE RESULT, NOT THE EXIT STATUS. `enable` sets err=0 as
+# soon as EITHER link is created (rc.common:44-54), so an S19 that succeeds and
+# a K84 that fails reports success — and the K link `disable` had just removed
+# would be gone with the rollback never running. `enabled` (rc.common:56-64) is
+# the opposite: it demands both, with the values the current script carries.
+# That makes it useless as the precondition here — on the very boxes this
+# exists for it answers no — and exactly right as the postcondition. Raised by
+# Codex review, 2026-09-23.
+#
+# Note this re-enables from the init script that is ACTUALLY installed. apk keeps
+# an operator-modified /etc/init.d/wwand and drops ours beside it as .apk-new
+# (reproduced 2026-09-22), so on such a box the links follow the modified script's
+# own START/STOP. That is the right way round — we do not overrule an edit — but
+# it means the new order arrives only once that edit is reconciled.
+define Package/wwand/postinst
+#!/bin/sh
+[ -n "$${IPKG_INSTROOT}" ] && exit 0
+
+old=
+start=
+for l in /etc/rc.d/S??wwand /etc/rc.d/K??wwand; do
+	[ -L "$$l" ] || continue
+	old="$$old $$l"
+	case "$$l" in /etc/rc.d/S*) start=1 ;; esac
+done
+
+if [ -x /etc/init.d/wwand ] && [ -n "$$start" ]; then
+	/etc/init.d/wwand disable
+	/etc/init.d/wwand enable
+	/etc/init.d/wwand enabled || {
+		# put back WHAT WAS THERE, which means removing what the half-done
+		# enable left as well: restoring the old names on top of a stray new
+		# one produces a third state nobody chose, and a service that starts
+		# twice at boot is not the state we promised to preserve.
+		for l in /etc/rc.d/S??wwand /etc/rc.d/K??wwand; do
+			[ -L "$$l" ] || continue
+			case " $$old " in *" $$l "*) continue ;; esac
+			rm -f "$$l"
+		done
+		for l in $$old; do ln -sf ../init.d/wwand "$$l"; done
+	}
+fi
+
+exit 0
 endef
 
 define Package/wwand/install
@@ -438,6 +521,53 @@ define Package/wwand-esim/install
 endef
 
 # ---------------------------------------------------------------------------
+# wwand-gps: read NMEA off the modem's NMEA port. Backend-neutral — finding the
+# port and starting the receiver are both in the base package, and neither
+# depends on the control protocol.
+# ---------------------------------------------------------------------------
+define Package/wwand-gps
+  SECTION:=net
+  CATEGORY:=Network
+  SUBMENU:=WWAN
+  TITLE:=GNSS/NMEA reader for wwand
+  # Reads NMEA off the modem's own port and reports it through wwand's ubus.
+  # It used to drive ugps (OpenWrt base) instead, and no longer depends on it:
+  # ugps takes ONE static tty out of /etc/config/gps and publishes ONE `gps`
+  # object, so a two-modem box could only ever have one position; it exits on
+  # tty EOF, which on a modem reset means respawning against a device that is
+  # not back; and it parses neither GSV (satellites in view) nor GSA (fix type,
+  # PDOP/VDOP) and drops every talker but $GP/$GN. wwand already finds the
+  # port, starts the receiver and owns the lifecycle, so the reading is the
+  # small part. Installing ugps alongside is harmless — wwand does not touch
+  # /etc/config/gps and does not claim the `gps` ubus name.
+  DEPENDS:=+wwand
+endef
+
+define Package/wwand-gps/description
+ wwand finds the modem's NMEA port during enumeration (reported as `gps_port`)
+ and `option gnss` starts the receiver with the vendor AT command — QMI's LOC
+ service is broken on Quectel and AT is what works, and only wwand has the
+ port. This package reads that port: NMEA 0183 framing, checksums, RMC/GGA/GSA/
+ GSV/GLL/VTG/ZDA from ANY talker, reported through `modem_gps` as numbers, with
+ the satellites in view and their SNR, the fix type and the DOP values.
+
+ ONE READER PER MODEM, so a two-modem router has two positions. `option
+ gnss_set_time` hands the receiver's clock to wwand's own set_clock, which only
+ ever steps a clock that is plainly unset and so never fights sysntpd.
+
+ Good citizen: it writes no config at all and does not claim the `gps` ubus
+ name, so ugps and an operator's own receiver are unaffected by installing it.
+ One port is only ever read once — a second modem naming a tty that is already
+ being read is refused rather than given half a stream.
+endef
+
+define Package/wwand-gps/install
+	$(INSTALL_DIR) $(1)$(UCDIR)
+	$(INSTALL_DATA) $(WWAND_UCODE)/gps.uc $(1)$(UCDIR)/
+	$(INSTALL_DATA) $(WWAND_UCODE)/nmea.uc $(1)$(UCDIR)/
+endef
+
+# ---------------------------------------------------------------------------
 # wwand-datapath-rmnet_nss: Qualcomm NSS offload behind the VENDOR qmi_wwan_q.
 # A datapath add-on, not a control backend — it plugs into wwand's datapath
 # interface (`option mux 'rmnet_nss'`, or picked up on its own under 'auto').
@@ -527,6 +657,7 @@ $(eval $(call BuildPackage,wwand-mbim))
 $(eval $(call BuildPackage,wwand-ncm))
 $(eval $(call BuildPackage,wwand-mhi))
 $(eval $(call BuildPackage,wwand-esim))
+$(eval $(call BuildPackage,wwand-gps))
 $(eval $(call BuildPackage,wwand-apntest))
 define Package/wwand-datapath-rmnet_nss_mhi
   SECTION:=net

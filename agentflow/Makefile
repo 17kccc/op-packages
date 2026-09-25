@@ -10,12 +10,12 @@ AGENTFLOW_ARCH_x86_64:=amd64
 AGENTFLOW_ARCH_aarch64:=arm64
 AGENTFLOW_ARCH:=$(AGENTFLOW_ARCH_$(ARCH))
 
-AGENTFLOW_HASH_x86_64:=95cb43ba4e2ce5f060e3609d050caf25170dc151ba882a3a626494b7750d5fbc
-AGENTFLOW_HASH_aarch64:=93e92628b26087b87d8571400e83046197167e4795593e757d4dcf7dac5f8231
+AGENTFLOW_HASH_x86_64:=266ceb4bc47d8ef0d2d731594a612266573bb93c4e23e9e329acf00c3bac4087
+AGENTFLOW_HASH_aarch64:=7790a94a0a04e57d196165ef96177475125c1b24fe24321f6927a55b2c62211f
 
 PKG_NAME:=agentflow
-PKG_VERSION:=0.3.3
-PKG_RELEASE:=11
+PKG_VERSION:=0.3.5
+PKG_RELEASE:=15
 
 AGENTFLOW_URL_FILE:=agentflow-linux-$(AGENTFLOW_ARCH)
 AGENTFLOW_DOWNLOAD:=$(AGENTFLOW_URL_FILE)-$(AGENTFLOW_HASH_$(ARCH))
@@ -40,7 +40,7 @@ define Package/$(PKG_NAME)
 	CATEGORY:=Network
 	SUBMENU:=Web Servers/Proxies
 	TITLE:=AgentFlow
-	DEPENDS:=@(x86_64||aarch64) +git +git-http +mise
+	DEPENDS:=@(x86_64||aarch64) +git +git-http +mise +linkease-app-entry
 	URL:=https://agentflow.geili.ai/
 endef
 
@@ -58,6 +58,9 @@ if [ "$${IPKG_INSTROOT}" = "" ]; then
 	if [ "$$(readlink /usr/share/linkeasefull/desktop-apps.d/30-agentflow.json 2>/dev/null)" = "/usr/share/agentflow/agentflow-plugin.json" ]; then
 		rm -f /usr/share/linkeasefull/desktop-apps.d/30-agentflow.json
 	fi
+	if [ "$$(readlink /usr/share/linkease/apps.d/30-agentflow.json 2>/dev/null)" = "/usr/share/agentflow/agentflow-plugin.json" ]; then
+		rm -f /usr/share/linkease/apps.d/30-agentflow.json
+	fi
 fi
 exit 0
 endef
@@ -74,7 +77,7 @@ define Build/Compile
 endef
 
 define Package/$(PKG_NAME)/install
-	$(INSTALL_DIR) $(1)/usr/sbin $(1)/etc/init.d $(1)/etc/uci-defaults $(1)/etc/config $(1)/usr/share/agentflow/www $(1)/usr/share/linkeasefull/desktop-apps.d
+	$(INSTALL_DIR) $(1)/usr/sbin $(1)/etc/init.d $(1)/etc/uci-defaults $(1)/etc/config $(1)/usr/share/agentflow/www $(1)/usr/share/linkease/apps.d $(1)/usr/share/linkeasefull/desktop-apps.d
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/agentflow $(1)/usr/sbin/agentflow
 	$(INSTALL_BIN) ./files/agentflow.init $(1)/etc/init.d/agentflow
 	$(INSTALL_BIN) ./files/agentflow.uci-default $(1)/etc/uci-defaults/09-agentflow
@@ -82,6 +85,7 @@ define Package/$(PKG_NAME)/install
 	$(INSTALL_DATA) ./files/agentflow-plugin.json $(1)/usr/share/agentflow/agentflow-plugin.json
 	$(INSTALL_DATA) ./files/www/logo.svg $(1)/usr/share/agentflow/www/logo.svg
 	ln -sf /usr/share/agentflow/agentflow-plugin.json $(1)/usr/share/linkeasefull/desktop-apps.d/30-agentflow.json
+	ln -sf /usr/share/agentflow/agentflow-plugin.json $(1)/usr/share/linkease/apps.d/30-agentflow.json
 endef
 
 $(eval $(call Download,agentflow))
